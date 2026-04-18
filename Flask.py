@@ -1,229 +1,176 @@
+import os
 import threading
 import asyncio
 from flask import Flask, render_template_string, request, jsonify
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
-import webbrowser
 
-# --- AYARLAR ---
-# https://my.telegram.org adresinden aldığınız bilgileri buraya girin
-API_ID = 27861882  # Burayı sayı olarak değiştirin
+# --- SENİN BİLGİLERİN ---
+API_ID = 27861882
 API_HASH = 'd1c630d699c775e846bf64aadd18aefd'
 
 app = Flask(__name__)
+
+# Global Değişkenler
 client = None
-phone_code_hash = None
-target_phone = None
-
-# Kurallar ve Loglar
-rules = {} 
+rules = {}  # Kelime: Cevap
 logs = []
+phone_number = None
 
-def add_log(text):
-    print(f"[LOG] {text}")
-    logs.append(text)
+def add_log(msg):
+    logs.append(msg)
+    print(f"[LOG]: {msg}")
 
-# --- HTML/CSS ARAYÜZÜ ---
-HTML_PAGE = """
+# --- HTML ARAYÜZÜ ---
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
-    <title>Telegram Bot Panel</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram Otomatik Bot</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { background-color: #f0f2f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .main-card { border: none; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); background: white; }
-        .header-box { background: #0088cc; color: white; border-radius: 15px 15px 0 0; padding: 20px; }
-        .log-area { background: #1e1e1e; color: #00ff00; height: 250px; overflow-y: auto; font-family: 'Courier New', monospace; padding: 15px; border-radius: 8px; font-size: 13px; }
-        .btn-telegram { background: #0088cc; color: white; border: none; }
-        .btn-telegram:hover { background: #0077b5; color: white; }
-        .rule-item { border-left: 5px solid #0088cc; margin-bottom: 10px; background: #f8f9fa; }
+        body { background: #f0f2f5; padding: 20px; font-family: sans-serif; }
+        .card { border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); border: none; margin-bottom: 20px; }
+        .log-box { background: #222; color: #0f0; height: 200px; overflow-y: auto; padding: 15px; font-family: monospace; border-radius: 10px; font-size: 12px; }
+        .btn-primary { background: #0088cc; border: none; }
     </style>
 </head>
 <body>
-    <div class="container py-5">
-        <div class="row justify-content-center">
-            <div class="col-lg-8">
-                <div class="card main-card">
-                    <div class="header-box text-center">
-                        <h2 class="mb-0">Telegram Otomatik Yanıt Sistemi</h2>
-                        <small>Hesabınızı yönetin ve kurallar ekleyin</small>
-                    </div>
-                    
-                    <div class="card-body p-4">
-                        <!-- Login Bölümü -->
-                        <div id="auth-section" class="mb-4 p-3 border rounded">
-                            <h5>1. Adım: Hesaba Bağlan</h5>
-                            <div class="input-group mb-2">
-                                <input type="text" id="phone" class="form-control" placeholder="+905xxxxxxxxx">
-                                <button onclick="sendCode()" class="btn btn-telegram">Kod Gönder</button>
-                            </div>
-                            <div id="otp-area" style="display:none;">
-                                <div class="input-group mb-2">
-                                    <input type="text" id="otp" class="form-control" placeholder="Telegram'dan gelen kod">
-                                    <button onclick="verifyCode()" class="btn btn-success">Giriş Yap</button>
-                                </div>
-                            </div>
-                        </div>
+<div class="container" style="max-width: 700px;">
+    <div class="card p-4 text-center">
+        <h2 style="color: #0088cc;">Telegram Bot Paneli</h2>
+        <p class="text-muted">Hesabınızı buradan bağlayın ve kuralları yönetin.</p>
+    </div>
 
-                        <!-- Kural Ekleme -->
-                        <div class="mb-4">
-                            <h5>2. Adım: Otomatik Yanıt Kuralları</h5>
-                            <div class="row g-2">
-                                <div class="col-md-5">
-                                    <input type="text" id="trigger" class="form-control" placeholder="Eğer mesaj bunu içerirse...">
-                                </div>
-                                <div class="col-md-5">
-                                    <input type="text" id="reply" class="form-control" placeholder="Şu cevabı gönder...">
-                                </div>
-                                <div class="col-md-2">
-                                    <button onclick="addRule()" class="btn btn-dark w-100">Ekle</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Canlı Loglar -->
-                        <div class="mb-4">
-                            <h5>İşlem Kayıtları</h5>
-                            <div id="log-box" class="log-area"></div>
-                        </div>
-
-                        <!-- Aktif Kurallar Listesi -->
-                        <div>
-                            <h5>Aktif Kurallar</h5>
-                            <div id="rule-list"></div>
-                        </div>
-                    </div>
-                </div>
+    <div class="card p-4">
+        <h5>1. Adım: Giriş Yap</h5>
+        <div id="step1">
+            <div class="input-group mb-3">
+                <input type="text" id="phone" class="form-control" placeholder="+905xxxxxxxxx">
+                <button onclick="sendCode()" class="btn btn-primary">Kod Gönder</button>
+            </div>
+        </div>
+        <div id="step2" style="display:none;">
+            <div class="input-group mb-3">
+                <input type="text" id="otp" class="form-control" placeholder="Gelen Kodu Girin">
+                <button onclick="verifyCode()" class="btn btn-success">Girişi Tamamla</button>
             </div>
         </div>
     </div>
 
-    <script>
-        function sendCode() {
-            const phone = document.getElementById('phone').value;
-            fetch('/send_code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({phone: phone})
-            })
-            .then(r => r.json())
-            .then(data => {
-                if(data.status === "ok") {
-                    document.getElementById('otp-area').style.display = 'block';
-                    alert("Onay kodu gönderildi!");
-                } else {
-                    alert("Hata: " + data.message);
-                }
-            });
-        }
+    <div class="card p-4">
+        <h5>2. Adım: Otomatik Yanıt Kuralları</h5>
+        <div class="row g-2">
+            <div class="col-5"><input type="text" id="trigger" class="form-control" placeholder="Eğer mesaj buysa..."></div>
+            <div class="col-5"><input type="text" id="reply" class="form-control" placeholder="Şu cevabı ver..."></div>
+            <div class="col-2"><button onclick="addRule()" class="btn btn-dark w-100">Ekle</button></div>
+        </div>
+        <div id="rule-list" class="mt-3"></div>
+    </div>
 
-        function verifyCode() {
-            const otp = document.getElementById('otp').value;
-            fetch('/verify', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({otp: otp})
-            })
-            .then(r => r.json())
-            .then(data => {
-                alert(data.message);
-            });
-        }
+    <div class="card p-4">
+        <h5>Sistem Kayıtları</h5>
+        <div id="logs" class="log-box"></div>
+    </div>
+</div>
 
-        function addRule() {
-            const t = document.getElementById('trigger').value;
-            const r = document.getElementById('reply').value;
-            fetch('/add_rule', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({trigger: t, reply: r})
-            })
-            .then(() => {
-                const list = document.getElementById('rule-list');
-                list.innerHTML += `<div class="p-2 rule-item"><strong>${t}</strong> yazana <strong>${r}</strong> denecek.</div>`;
-            });
-        }
+<script>
+    function sendCode() {
+        const p = document.getElementById('phone').value;
+        fetch('/send_code', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:p}) })
+        .then(res => res.json()).then(data => {
+            alert(data.msg);
+            if(data.status==='ok') document.getElementById('step2').style.display='block';
+        });
+    }
 
-        setInterval(() => {
-            fetch('/get_logs').then(r => r.json()).then(data => {
-                const box = document.getElementById('log-box');
-                box.innerHTML = data.join('<br>');
-                box.scrollTop = box.scrollHeight;
-            });
-        }, 2000);
-    </script>
+    function verifyCode() {
+        const c = document.getElementById('otp').value;
+        fetch('/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({otp:c}) })
+        .then(res => res.json()).then(data => alert(data.msg));
+    }
+
+    function addRule() {
+        const t = document.getElementById('trigger').value;
+        const r = document.getElementById('reply').value;
+        fetch('/add_rule', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trigger:t, reply:r}) })
+        .then(() => {
+            document.getElementById('rule-list').innerHTML += `<div class='badge bg-info m-1'>${t} -> ${r}</div>`;
+        });
+    }
+
+    setInterval(() => {
+        fetch('/get_logs').then(res => res.json()).then(data => {
+            const box = document.getElementById('logs');
+            box.innerHTML = data.join('<br>');
+            box.scrollTop = box.scrollHeight;
+        });
+    }, 2000);
+</script>
 </body>
 </html>
 """
 
-# --- BACKEND İŞLEMLERİ ---
+# --- BACKEND ---
 
 @app.route('/')
-def index():
-    return render_template_string(HTML_PAGE)
+def home():
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/send_code', methods=['POST'])
 def send_code():
-    global client, phone_code_hash, target_phone
-    target_phone = request.json['phone']
+    global client, phone_number
+    phone_number = request.json.get('phone')
     
-    # Yeni bir loop oluşturarak client'ı başlat
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    client = TelegramClient(f"session_{target_phone}", API_ID, API_HASH)
+    client = TelegramClient(f"session_{phone_number}", API_ID, API_HASH)
     
-    async def connect_and_send():
-        await client.connect()
-        result = await client.send_code_request(target_phone)
-        return result.phone_code_hash
-
     try:
-        phone_code_hash = loop.run_until_complete(connect_and_send())
-        add_log(f"Kod {target_phone} numarasına gönderildi.")
-        return jsonify({"status": "ok"})
+        loop.run_until_complete(client.connect())
+        loop.run_until_complete(client.send_code_request(phone_number))
+        add_log(f"Kod istendi: {phone_number}")
+        return jsonify({"status": "ok", "msg": "Kod gönderildi, lütfen Telegram'ı kontrol edin."})
     except Exception as e:
-        add_log(f"Hata oluştu: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)})
+        return jsonify({"status": "error", "msg": str(e)})
 
 @app.route('/verify', methods=['POST'])
 def verify():
-    global client, phone_code_hash, target_phone
-    otp = request.json['otp']
+    otp = request.json.get('otp')
     
-    def start_bot():
+    def bot_thread():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        async def main():
-            await client.sign_in(target_phone, otp, phone_code_hash=phone_code_hash)
-            add_log("Giriş başarılı! Bot mesajları dinliyor...")
-
+        async def run():
+            await client.sign_in(phone_number, otp)
+            add_log("Giriş başarılı! Mesajlar dinleniyor...")
+            
             @client.on(events.NewMessage(incoming=True))
             async def handler(event):
                 if not event.is_private: return
-                msg = event.message.text.lower()
+                msg_text = event.message.text.lower()
                 
-                for trigger, reply in rules.items():
-                    if trigger in msg:
-                        add_log(f"Tetikleyici yakalandı: {trigger}")
-                        await event.reply(reply)
+                for trig, rep in rules.items():
+                    if trig in msg_text:
+                        add_log(f"Tetiklendi: {trig} -> Yanıt gönderildi.")
+                        await event.reply(rep)
             
             await client.run_until_disconnected()
+            
+        loop.run_until_complete(run())
 
-        loop.run_until_complete(main())
-
-    threading.Thread(target=start_bot, daemon=True).start()
-    return jsonify({"message": "Giriş işlemi tamamlandı, bot arka planda başlatıldı."})
+    threading.Thread(target=bot_thread, daemon=True).start()
+    return jsonify({"status": "ok", "msg": "Bot başarıyla başlatıldı!"})
 
 @app.route('/add_rule', methods=['POST'])
 def add_rule():
-    trigger = request.json['trigger'].lower()
-    reply = request.json['reply']
-    rules[trigger] = reply
-    add_log(f"Yeni kural eklendi: {trigger}")
+    t = request.json.get('trigger').lower()
+    r = request.json.get('reply')
+    rules[t] = r
+    add_log(f"Kural eklendi: {t}")
     return jsonify({"status": "ok"})
 
 @app.route('/get_logs')
@@ -231,6 +178,6 @@ def get_logs():
     return jsonify(logs)
 
 if __name__ == '__main__':
-    add_log("Sunucu başlatılıyor... Lütfen tarayıcıyı kontrol edin.")
-    webbrowser.open("http://127.0.0.1:5000")
-    app.run(port=5000, debug=False, threaded=True)
+    # Render için hayati önem taşıyan ayarlar
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
