@@ -16,11 +16,21 @@ rules = {}
 logs = []
 phone_number = None
 
+# Asyncio döngüsünü yönetecek değişkenler
+loop = asyncio.new_event_loop()
+
+def start_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+# Arka planda sürekli çalışacak bir döngü başlatıyoruz
+threading.Thread(target=start_async_loop, args=(loop,), daemon=True).start()
+
 def add_log(msg):
     logs.append(msg)
     print(f"[LOG]: {msg}")
 
-# --- HTML ARAYÜZÜ ---
+# --- HTML ARAYÜZÜ (Öncekiyle Aynı) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
@@ -32,13 +42,13 @@ HTML_TEMPLATE = """
     <style>
         body { background: #f0f2f5; padding: 20px; font-family: sans-serif; }
         .card { border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); border: none; margin-bottom: 20px; }
-        .log-box { background: #222; color: #0f0; height: 200px; overflow-y: auto; padding: 15px; font-family: monospace; border-radius: 10px; font-size: 12px; }
+        .log-box { background: #222; color: #0f0; height: 250px; overflow-y: auto; padding: 15px; font-family: monospace; border-radius: 10px; font-size: 12px; }
     </style>
 </head>
 <body>
 <div class="container" style="max-width: 700px;">
     <div class="card p-4 text-center">
-        <h2 style="color: #0088cc;">Telegram Bot Paneli (2FA Destekli)</h2>
+        <h2 style="color: #0088cc;">Telegram Bot Paneli (Sabit Döngü)</h2>
     </div>
 
     <div class="card p-4">
@@ -56,7 +66,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div id="step3" style="display:none;">
-            <div class="alert alert-warning">Hesabınızda 2 Adımlı Doğrulama var. Lütfen şifrenizi girin:</div>
+            <div class="alert alert-warning mt-2">2 Adımlı Doğrulama şifrenizi girin:</div>
             <div class="input-group mb-3">
                 <input type="password" id="password" class="form-control" placeholder="2FA Şifreniz">
                 <button onclick="verifyPassword()" class="btn btn-danger">Şifreyle Giriş Yap</button>
@@ -81,8 +91,6 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
-    let tempOTP = "";
-
     function sendCode() {
         const p = document.getElementById('phone').value;
         fetch('/send_code', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:p}) })
@@ -93,8 +101,8 @@ HTML_TEMPLATE = """
     }
 
     function verifyCode() {
-        tempOTP = document.getElementById('otp').value;
-        fetch('/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({otp:tempOTP}) })
+        const otp = document.getElementById('otp').value;
+        fetch('/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({otp:otp}) })
         .then(res => res.json()).then(data => {
             if(data.status === 'password_required') {
                 document.getElementById('step3').style.display='block';
@@ -131,72 +139,74 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- BACKEND ---
+# --- BACKEND (Event Loop Hatası Çözülmüş Hali) ---
 
-@app.route('/')
-def home():
-    return render_template_string(HTML_TEMPLATE)
+async def connect_client(phone):
+    global client
+    if client is None:
+        client = TelegramClient(f"session_{phone}", API_ID, API_HASH)
+    if not client.is_connected():
+        await client.connect()
+    return await client.send_code_request(phone)
 
 @app.route('/send_code', methods=['POST'])
 def send_code():
-    global client, phone_number
+    global phone_number
     phone_number = request.json.get('phone')
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    client = TelegramClient(f"session_{phone_number}", API_ID, API_HASH)
+    # İşi arka plandaki döngüye gönderiyoruz
+    future = asyncio.run_coroutine_threadsafe(connect_client(phone_number), loop)
     try:
-        loop.run_until_complete(client.connect())
-        loop.run_until_complete(client.send_code_request(phone_number))
+        future.result(timeout=30)
         add_log(f"Kod gönderildi: {phone_number}")
         return jsonify({"status": "ok", "msg": "Kod gönderildi."})
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)})
 
+async def sign_in_code(phone, otp):
+    return await client.sign_in(phone, otp)
+
 @app.route('/verify', methods=['POST'])
 def verify():
     otp = request.json.get('otp')
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    future = asyncio.run_coroutine_threadsafe(sign_in_code(phone_number, otp), loop)
     try:
-        # Kodla giriş denemesi
-        loop.run_until_complete(client.sign_in(phone_number, otp))
-        start_bot_in_background()
+        future.result(timeout=30)
+        start_listening()
         return jsonify({"status": "ok", "msg": "Başarıyla giriş yapıldı!"})
     except errors.SessionPasswordNeededError:
-        add_log("2FA Şifresi gerekiyor...")
-        return jsonify({"status": "password_required", "msg": "Şifre gerekli."})
+        return jsonify({"status": "password_required", "msg": "2FA Şifresi gerekli."})
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)})
+
+async def sign_in_password(password):
+    return await client.sign_in(password=password)
 
 @app.route('/verify_password', methods=['POST'])
 def verify_password():
     password = request.json.get('password')
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    future = asyncio.run_coroutine_threadsafe(sign_in_password(password), loop)
     try:
-        loop.run_until_complete(client.sign_in(password=password))
-        start_bot_in_background()
+        future.result(timeout=30)
+        start_listening()
         return jsonify({"status": "ok", "msg": "Şifre doğrulandı, bot aktif!"})
     except Exception as e:
         return jsonify({"status": "error", "msg": f"Şifre hatası: {str(e)}"})
 
-def start_bot_in_background():
-    def bot_thread():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        async def run():
-            add_log("Bot dinlemeye başladı...")
-            @client.on(events.NewMessage(incoming=True))
-            async def handler(event):
-                if not event.is_private: return
-                msg = event.message.text.lower()
-                for t, r in rules.items():
-                    if t in msg:
-                        await event.reply(r)
-                        add_log(f"Yanıtlandı: {t}")
-            await client.run_until_disconnected()
-        loop.run_until_complete(run())
-    threading.Thread(target=bot_thread, daemon=True).start()
+def start_listening():
+    async def listen_task():
+        add_log("Mesajlar dinleniyor...")
+        @client.on(events.NewMessage(incoming=True))
+        async def handler(event):
+            if not event.is_private: return
+            msg = event.message.text.lower()
+            for t, r in rules.items():
+                if t in msg:
+                    await event.reply(r)
+                    add_log(f"Yanıtlandı: {t}")
+        # Bağlantı kopmaması için dinlemeye devam et
+        await client.run_until_disconnected()
+    
+    asyncio.run_coroutine_threadsafe(listen_task(), loop)
 
 @app.route('/add_rule', methods=['POST'])
 def add_rule():
